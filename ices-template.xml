@@ -1,0 +1,32 @@
+<?xml version="1.0"?>
+<ices:Configuration xmlns:ices="http://www.icecast.org/projects/ices">
+  <Playlist>
+    <Type>perl</Type>
+    <Module>ClaqRadio</Module>
+  </Playlist>
+
+  <Execution>
+    <Background>0</Background>
+    <Verbose>0</Verbose>
+    <BaseDirectory>{{.BaseDirectory}}</BaseDirectory>
+  </Execution>
+
+  <Stream>
+    <Server>
+      <Hostname>{{.IcecastHost}}</Hostname>
+      <Port>{{.IcecastPort}}</Port>
+      <Password>{{.IcecastPassword}}</Password>
+      <Protocol>http</Protocol>
+    </Server>
+
+    <Mountpoint>{{.Mountpoint}}</Mountpoint>
+    <Name>{{.StreamName}}</Name>
+    <Genre>{{.Genre}}</Genre>
+    <Description>{{.Description}}</Description>
+    <URL>{{.URL}}</URL>
+    <Public>0</Public>
+    <Bitrate>{{.Bitrate}}</Bitrate>
+    <Reencode>1</Reencode>
+    <Channels>2</Channels>
+  </Stream>
+</ices:Configuration>
