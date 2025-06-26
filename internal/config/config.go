@@ -79,7 +79,7 @@ func Load() (*Config, error) {
 	if val := os.Getenv("ICECAST_PORT"); val != "" {
 		if port, err := strconv.Atoi(val); err == nil {
 			config.Icecast.Port = port
-		} else {
+		}
 	}
 	if val := os.Getenv("ICECAST_PASSWORD"); val != "" {
 		config.Icecast.Password = val
