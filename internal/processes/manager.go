@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"radio-stream-manager/internal/config"
-	"radio-stream-manager/internal/events"
+	"radio-stream-manager/internal/types"
 	"radio-stream-manager/internal/state"
 	"radio-stream-manager/internal/templates"
 
@@ -41,7 +41,7 @@ func NewManager(cfg *config.Config, stateManager *state.DynamoDBManager, logger 
 	}
 }
 
-func (m *Manager) StartStream(ctx context.Context, event events.StreamEvent) error {
+func (m *Manager) StartStream(ctx context.Context, event types.StreamEvent) error {
 	m.mutex.Lock()
 	defer m.mutex.Unlock()
 
@@ -167,7 +167,7 @@ func (m *Manager) StopStream(ctx context.Context, streamID string) error {
 	return nil
 }
 
-func (m *Manager) UpdateStream(ctx context.Context, event events.StreamEvent) error {
+func (m *Manager) UpdateStream(ctx context.Context, event types.StreamEvent) error {
 	// For now, restart the stream with new configuration
 	if err := m.StopStream(ctx, event.StreamID); err != nil {
 		return fmt.Errorf("failed to stop stream for update: %w", err)
