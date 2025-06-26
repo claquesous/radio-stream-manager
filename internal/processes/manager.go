@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sync"
 	"syscall"
 	"time"
@@ -59,19 +60,23 @@ func (m *Manager) StartStream(ctx context.Context, event types.StreamEvent) erro
 		IcecastHost:     m.config.Icecast.Host,
 		IcecastPort:     m.config.Icecast.Port,
 		IcecastPassword: m.config.Icecast.Password,
-		LogDir:          fmt.Sprintf("%s/stream-%s", m.config.Ices.LogDir, streamID),
 		Genre:           event.Payload.Genre,
 		Description:     event.Payload.Description,
 		URL:             fmt.Sprintf("%s/s/%s", m.config.API.BaseURL, streamID),
 	}
 
+	logDir := fmt.Sprintf("%s/stream-%s", m.config.Ices.LogDir, streamID)
 	configPath := fmt.Sprintf("%s/stream-%s.xml", m.config.Ices.ConfigDir, streamID)
 	templatePath := filepath.Join(filepath.Dir(os.Args[0]), "ices-template.xml")
 
 	// Set template values
-	icesConfig.BaseDirectory = icesConfig.LogDir
+	icesConfig.BaseDirectory = logDir
 	icesConfig.Mountpoint = fmt.Sprintf("/stream-%s", streamID)
-	icesConfig.Bitrate = event.Payload.Premium ? 128 : 64
+	if event.Payload.Premium {
+			icesConfig.Bitrate = 128
+	} else {
+			icesConfig.Bitrate = 64
+	}
 
 	// Generate configuration file
 	if err := templates.GenerateIcesConfig(icesConfig, templatePath, configPath); err != nil {
@@ -79,7 +84,7 @@ func (m *Manager) StartStream(ctx context.Context, event types.StreamEvent) erro
 	}
 
 	// Create log directory
-	if err := os.MkdirAll(icesConfig.LogDir, 0755); err != nil {
+	if err := os.MkdirAll(logDir, 0755); err != nil {
 		return fmt.Errorf("failed to create log directory: %w", err)
 	}
 
