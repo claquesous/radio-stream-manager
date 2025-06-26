@@ -18,7 +18,7 @@ type DynamoDBManager struct {
 }
 
 type StreamProcess struct {
-	StreamID      string    `dynamodbav:"stream_id"`
+	StreamID      int       `dynamodbav:"stream_id"`
 	Status        string    `dynamodbav:"status"`
 	ProcessID     int       `dynamodbav:"process_id"`
 	ConfigPath    string    `dynamodbav:"config_path"`
@@ -63,11 +63,11 @@ func (m *DynamoDBManager) SaveProcess(ctx context.Context, process *StreamProces
 	return nil
 }
 
-func (m *DynamoDBManager) GetProcess(ctx context.Context, streamID string) (*StreamProcess, error) {
+func (m *DynamoDBManager) GetProcess(ctx context.Context, streamID int) (*StreamProcess, error) {
 	result, err := m.client.GetItem(ctx, &dynamodb.GetItemInput{
 		TableName: aws.String(m.tableName),
 		Key: map[string]types.AttributeValue{
-			"stream_id": &types.AttributeValueMemberS{Value: streamID},
+			"stream_id": &types.AttributeValueMemberN{Value: fmt.Sprintf("%d", streamID)},
 		},
 	})
 	if err != nil {
@@ -86,11 +86,11 @@ func (m *DynamoDBManager) GetProcess(ctx context.Context, streamID string) (*Str
 	return &process, nil
 }
 
-func (m *DynamoDBManager) DeleteProcess(ctx context.Context, streamID string) error {
+func (m *DynamoDBManager) DeleteProcess(ctx context.Context, streamID int) error {
 	_, err := m.client.DeleteItem(ctx, &dynamodb.DeleteItemInput{
 		TableName: aws.String(m.tableName),
 		Key: map[string]types.AttributeValue{
-			"stream_id": &types.AttributeValueMemberS{Value: streamID},
+			"stream_id": &types.AttributeValueMemberN{Value: fmt.Sprintf("%d", streamID)},
 		},
 	})
 	if err != nil {
@@ -120,11 +120,11 @@ func (m *DynamoDBManager) ListProcesses(ctx context.Context) ([]*StreamProcess, 
 	return processes, nil
 }
 
-func (m *DynamoDBManager) UpdateHeartbeat(ctx context.Context, streamID string) error {
+func (m *DynamoDBManager) UpdateHeartbeat(ctx context.Context, streamID int) error {
 	_, err := m.client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
 		TableName: aws.String(m.tableName),
 		Key: map[string]types.AttributeValue{
-			"stream_id": &types.AttributeValueMemberS{Value: streamID},
+			"stream_id": &types.AttributeValueMemberN{Value: fmt.Sprintf("%d", streamID)},
 		},
 		UpdateExpression: aws.String("SET last_heartbeat = :heartbeat"),
 		ExpressionAttributeValues: map[string]types.AttributeValue{

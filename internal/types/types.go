@@ -4,7 +4,7 @@ import "time"
 
 type StreamEvent struct {
 	EventType string        `json:"event_type"`
-	StreamID  string        `json:"stream_id"`
+	StreamID  int           `json:"stream_id"`
 	Timestamp time.Time     `json:"timestamp"`
 	Payload   StreamPayload `json:"payload"`
 }

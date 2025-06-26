@@ -27,7 +27,7 @@ type Manager struct {
 }
 
 type ProcessInfo struct {
-	StreamID string
+	StreamID int
 	Process  *os.Process
 	Config   *templates.IcesConfig
 	Started  time.Time
@@ -134,7 +134,7 @@ func (m *Manager) StartStream(ctx context.Context, event types.StreamEvent) erro
 	return nil
 }
 
-func (m *Manager) StopStream(ctx context.Context, streamID string) error {
+func (m *Manager) StopStream(ctx context.Context, streamID int) error {
 	m.mutex.Lock()
 	defer m.mutex.Unlock()
 
@@ -189,7 +189,7 @@ func (m *Manager) StopAll() error {
 
 	for streamID, processInfo := range m.processes {
 		if err := processInfo.Process.Signal(syscall.SIGTERM); err != nil {
-			m.logger.Error("Failed to stop process", zap.Error(err), zap.String("stream_id", streamID))
+			m.logger.Error("Failed to stop process", zap.Error(err), zap.Int("stream_id", streamID))
 		}
 	}
 
@@ -199,7 +199,7 @@ func (m *Manager) StopAll() error {
 	// Force kill any remaining processes
 	for streamID, processInfo := range m.processes {
 		if err := processInfo.Process.Kill(); err != nil {
-			m.logger.Error("Failed to kill process", zap.Error(err), zap.String("stream_id", streamID))
+			m.logger.Error("Failed to kill process", zap.Error(err), zap.Int("stream_id", streamID))
 		}
 	}
 
@@ -227,12 +227,12 @@ func (m *Manager) healthCheck(ctx context.Context) {
 
 	for streamID := range m.processes {
 		if err := m.stateManager.UpdateHeartbeat(ctx, streamID); err != nil {
-			m.logger.Error("Failed to update heartbeat", zap.Error(err), zap.String("stream_id", streamID))
+			m.logger.Error("Failed to update heartbeat", zap.Error(err), zap.Int("stream_id", streamID))
 		}
 	}
 }
 
-func (m *Manager) monitorProcess(streamID string, cmd *exec.Cmd) {
+func (m *Manager) monitorProcess(streamID int, cmd *exec.Cmd) {
 	err := cmd.Wait()
 	m.mutex.Lock()
 	defer m.mutex.Unlock()
