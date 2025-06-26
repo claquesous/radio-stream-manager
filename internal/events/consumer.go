@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"radio-stream-manager/internal/config"
+	"radio-stream-manager/internal/types"
 	"radio-stream-manager/internal/processes"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -89,7 +90,7 @@ func (c *SQSConsumer) pollMessages(ctx context.Context) error {
 }
 
 func (c *SQSConsumer) processMessage(ctx context.Context, message types.Message) error {
-	var event StreamEvent
+	var event types.StreamEvent
 	if err := json.Unmarshal([]byte(*message.Body), &event); err != nil {
 		return fmt.Errorf("failed to unmarshal event: %w", err)
 	}
@@ -99,11 +100,11 @@ func (c *SQSConsumer) processMessage(ctx context.Context, message types.Message)
 	zap.String("stream_id", event.StreamID))
 
 	switch event.EventType {
-	case EventStreamCreated:
+	case types.EventStreamCreated:
 		return c.processManager.StartStream(ctx, event)
-	case EventStreamDestroyed:
+	case types.EventStreamDestroyed:
 		return c.processManager.StopStream(ctx, event.StreamID)
-	case EventStreamUpdated:
+	case types.EventStreamUpdated:
 		return c.processManager.UpdateStream(ctx, event)
 	default:
 		c.logger.Warn("Unknown event type", zap.String("event_type", event.EventType))

@@ -1,4 +1,4 @@
-package events
+package types
 
 import "time"
 
@@ -10,10 +10,10 @@ type StreamEvent struct {
 }
 
 type StreamPayload struct {
-	Name        string  `json:"name"`
-	Premium     bool    `json:"premium"`
-	Description string  `json:"description"`
-	Genre       string  `json:"genre"`
+	Name        string `json:"name"`
+	Premium     bool   `json:"premium"`
+	Description string `json:"description"`
+	Genre       string `json:"genre"`
 }
 
 const (
