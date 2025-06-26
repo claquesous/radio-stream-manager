@@ -13,7 +13,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
-	"github.com/aws/aws-sdk-go-v2/service/sqs/types"
+	awstypes "github.com/aws/aws-sdk-go-v2/service/sqs/types"
 	"go.uber.org/zap"
 )
 
@@ -60,7 +60,6 @@ func (c *SQSConsumer) pollMessages(ctx context.Context) error {
 		QueueUrl:            aws.String(c.queueURL),
 		MaxNumberOfMessages: 10,
 		WaitTimeSeconds:     20,
-		VisibilityTimeoutSeconds: 300,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to receive messages: %w", err)
@@ -89,7 +88,7 @@ func (c *SQSConsumer) pollMessages(ctx context.Context) error {
 	return nil
 }
 
-func (c *SQSConsumer) processMessage(ctx context.Context, message types.Message) error {
+func (c *SQSConsumer) processMessage(ctx context.Context, message awstypes.Message) error {
 	var event types.StreamEvent
 	if err := json.Unmarshal([]byte(*message.Body), &event); err != nil {
 		return fmt.Errorf("failed to unmarshal event: %w", err)
