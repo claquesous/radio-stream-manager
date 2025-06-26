@@ -96,7 +96,7 @@ func (c *SQSConsumer) processMessage(ctx context.Context, message awstypes.Messa
 
 	c.logger.Info("Processing stream event",
 	zap.String("event_type", event.EventType),
-	zap.String("stream_id", event.StreamID))
+	zap.Int("stream_id", event.StreamID))
 
 	switch event.EventType {
 	case types.EventStreamCreated:
