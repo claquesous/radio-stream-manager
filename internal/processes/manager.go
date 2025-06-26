@@ -93,6 +93,7 @@ func (m *Manager) StartStream(ctx context.Context, event types.StreamEvent) erro
 	cmd.Env = append(os.Environ(),
 		fmt.Sprintf("STREAM_ID=%d", streamID),
 		fmt.Sprintf("CLAQRADIO_STREAM_URL=%s", m.config.API.BaseURL),
+		fmt.Sprintf("PERLLIB=%s/modules", m.config.Ices.ConfigDir),
 	)
 
 	if err := cmd.Start(); err != nil {
