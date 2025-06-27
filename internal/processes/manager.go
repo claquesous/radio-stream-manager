@@ -129,8 +129,9 @@ func (m *Manager) StartStream(ctx context.Context, event types.StreamEvent) erro
 		zap.Int("pid", cmd.Process.Pid),
 		zap.String("config_path", configPath),
 	)
-	m.logger.Debug("Stream process environment",
+	m.logger.Debug("Stream process command and environment",
 		zap.Int("stream_id", streamID),
+		zap.String("command", cmd.String()),
 		zap.Strings("env", cmd.Env),
 	)
 
