@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"strconv"
 
 	"gopkg.in/yaml.v3"
 )
@@ -76,7 +77,9 @@ func Load() (*Config, error) {
 		config.Icecast.Host = val
 	}
 	if val := os.Getenv("ICECAST_PORT"); val != "" {
-		config.Icecast.Port = val
+		if port, err := strconv.Atoi(val); err == nil {
+			config.Icecast.Port = port
+		}
 	}
 	if val := os.Getenv("ICECAST_PASSWORD"); val != "" {
 		config.Icecast.Password = val

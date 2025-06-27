@@ -9,7 +9,7 @@ import (
 )
 
 type IcesConfig struct {
-	StreamID        string
+	StreamID        int
 	StreamName      string
 	IcecastHost     string
 	IcecastPort     int

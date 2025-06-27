@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sync"
 	"syscall"
 	"time"
@@ -21,12 +22,12 @@ type Manager struct {
 	config       *config.Config
 	stateManager *state.DynamoDBManager
 	logger       *zap.Logger
-	processes    map[string]*ProcessInfo
+	processes    map[int]*ProcessInfo
 	mutex        sync.RWMutex
 }
 
 type ProcessInfo struct {
-	StreamID string
+	StreamID int
 	Process  *os.Process
 	Config   *templates.IcesConfig
 	Started  time.Time
@@ -37,7 +38,7 @@ func NewManager(cfg *config.Config, stateManager *state.DynamoDBManager, logger 
 		config:       cfg,
 		stateManager: stateManager,
 		logger:       logger,
-		processes:    make(map[string]*ProcessInfo),
+		processes:    make(map[int]*ProcessInfo),
 	}
 }
 
@@ -48,7 +49,7 @@ func (m *Manager) StartStream(ctx context.Context, event types.StreamEvent) erro
 	streamID := event.StreamID
 
 	if _, exists := m.processes[streamID]; exists {
-		m.logger.Warn("Stream already running", zap.String("stream_id", streamID))
+		m.logger.Warn("Stream already running", zap.Int("stream_id", streamID))
 		return nil
 	}
 
@@ -59,19 +60,23 @@ func (m *Manager) StartStream(ctx context.Context, event types.StreamEvent) erro
 		IcecastHost:     m.config.Icecast.Host,
 		IcecastPort:     m.config.Icecast.Port,
 		IcecastPassword: m.config.Icecast.Password,
-		LogDir:          fmt.Sprintf("%s/stream-%s", m.config.Ices.LogDir, streamID),
 		Genre:           event.Payload.Genre,
 		Description:     event.Payload.Description,
-		URL:             fmt.Sprintf("%s/s/%s", m.config.API.BaseURL, streamID),
+		URL:             fmt.Sprintf("%s/s/%d", m.config.API.BaseURL, streamID),
 	}
 
-	configPath := fmt.Sprintf("%s/stream-%s.xml", m.config.Ices.ConfigDir, streamID)
+	logDir := fmt.Sprintf("%s/stream-%d", m.config.Ices.LogDir, streamID)
+	configPath := fmt.Sprintf("%s/stream-%d.xml", m.config.Ices.ConfigDir, streamID)
 	templatePath := filepath.Join(filepath.Dir(os.Args[0]), "ices-template.xml")
 
 	// Set template values
-	icesConfig.BaseDirectory = icesConfig.LogDir
-	icesConfig.Mountpoint = fmt.Sprintf("/stream-%s", streamID)
-	icesConfig.Bitrate = event.Payload.Premium ? 128 : 64
+	icesConfig.BaseDirectory = logDir
+	icesConfig.Mountpoint = fmt.Sprintf("/stream-%d", streamID)
+	if event.Payload.Premium {
+		icesConfig.Bitrate = 128
+	} else {
+		icesConfig.Bitrate = 64
+	}
 
 	// Generate configuration file
 	if err := templates.GenerateIcesConfig(icesConfig, templatePath, configPath); err != nil {
@@ -79,15 +84,16 @@ func (m *Manager) StartStream(ctx context.Context, event types.StreamEvent) erro
 	}
 
 	// Create log directory
-	if err := os.MkdirAll(icesConfig.LogDir, 0755); err != nil {
+	if err := os.MkdirAll(logDir, 0755); err != nil {
 		return fmt.Errorf("failed to create log directory: %w", err)
 	}
 
 	// Start ices process
 	cmd := exec.CommandContext(ctx, m.config.Ices.BinaryPath, "-c", configPath)
 	cmd.Env = append(os.Environ(),
-		fmt.Sprintf("STREAM_ID=%s", streamID),
+		fmt.Sprintf("STREAM_ID=%d", streamID),
 		fmt.Sprintf("CLAQRADIO_STREAM_URL=%s", m.config.API.BaseURL),
+		fmt.Sprintf("PERLLIB=%s/modules", m.config.Ices.ConfigDir),
 	)
 
 	if err := cmd.Start(); err != nil {
@@ -119,9 +125,15 @@ func (m *Manager) StartStream(ctx context.Context, event types.StreamEvent) erro
 	}
 
 	m.logger.Info("Started stream",
-	zap.String("stream_id", streamID),
-	zap.Int("pid", cmd.Process.Pid),
-	zap.String("config_path", configPath))
+		zap.Int("stream_id", streamID),
+		zap.Int("pid", cmd.Process.Pid),
+		zap.String("config_path", configPath),
+	)
+	m.logger.Debug("Stream process command and environment",
+		zap.Int("stream_id", streamID),
+		zap.String("command", cmd.String()),
+		zap.Strings("env", cmd.Env),
+	)
 
 	// Monitor process in background
 	go m.monitorProcess(streamID, cmd)
@@ -129,22 +141,22 @@ func (m *Manager) StartStream(ctx context.Context, event types.StreamEvent) erro
 	return nil
 }
 
-func (m *Manager) StopStream(ctx context.Context, streamID string) error {
+func (m *Manager) StopStream(ctx context.Context, streamID int) error {
 	m.mutex.Lock()
 	defer m.mutex.Unlock()
 
 	processInfo, exists := m.processes[streamID]
 	if !exists {
-		m.logger.Warn("Stream not found", zap.String("stream_id", streamID))
+		m.logger.Warn("Stream not found", zap.Int("stream_id", streamID))
 		return nil
 	}
 
 	// Terminate process
 	if err := processInfo.Process.Signal(syscall.SIGTERM); err != nil {
-		m.logger.Error("Failed to send SIGTERM", zap.Error(err), zap.String("stream_id", streamID))
+		m.logger.Error("Failed to send SIGTERM", zap.Error(err), zap.Int("stream_id", streamID))
 		// Force kill if SIGTERM fails
 		if err := processInfo.Process.Kill(); err != nil {
-			m.logger.Error("Failed to kill process", zap.Error(err), zap.String("stream_id", streamID))
+			m.logger.Error("Failed to kill process", zap.Error(err), zap.Int("stream_id", streamID))
 		}
 	}
 
@@ -157,12 +169,12 @@ func (m *Manager) StopStream(ctx context.Context, streamID string) error {
 	}
 
 	// Clean up config file
-	configPath := fmt.Sprintf("%s/stream-%s.xml", m.config.Ices.ConfigDir, streamID)
+	configPath := fmt.Sprintf("%s/stream-%d.xml", m.config.Ices.ConfigDir, streamID)
 	if err := os.Remove(configPath); err != nil {
 		m.logger.Warn("Failed to remove config file", zap.Error(err), zap.String("config_path", configPath))
 	}
 
-	m.logger.Info("Stopped stream", zap.String("stream_id", streamID))
+	m.logger.Info("Stopped stream", zap.Int("stream_id", streamID))
 
 	return nil
 }
@@ -184,7 +196,7 @@ func (m *Manager) StopAll() error {
 
 	for streamID, processInfo := range m.processes {
 		if err := processInfo.Process.Signal(syscall.SIGTERM); err != nil {
-			m.logger.Error("Failed to stop process", zap.Error(err), zap.String("stream_id", streamID))
+			m.logger.Error("Failed to stop process", zap.Error(err), zap.Int("stream_id", streamID))
 		}
 	}
 
@@ -194,11 +206,11 @@ func (m *Manager) StopAll() error {
 	// Force kill any remaining processes
 	for streamID, processInfo := range m.processes {
 		if err := processInfo.Process.Kill(); err != nil {
-			m.logger.Error("Failed to kill process", zap.Error(err), zap.String("stream_id", streamID))
+			m.logger.Error("Failed to kill process", zap.Error(err), zap.Int("stream_id", streamID))
 		}
 	}
 
-	m.processes = make(map[string]*ProcessInfo)
+	m.processes = make(map[int]*ProcessInfo)
 	return nil
 }
 
@@ -208,9 +220,9 @@ func (m *Manager) StartHealthMonitor(ctx context.Context) {
 
 	for {
 		select {
-			case <-ctx.Done():
+		case <-ctx.Done():
 			return
-			case <-ticker.C:
+		case <-ticker.C:
 			m.healthCheck(ctx)
 		}
 	}
@@ -222,12 +234,12 @@ func (m *Manager) healthCheck(ctx context.Context) {
 
 	for streamID := range m.processes {
 		if err := m.stateManager.UpdateHeartbeat(ctx, streamID); err != nil {
-			m.logger.Error("Failed to update heartbeat", zap.Error(err), zap.String("stream_id", streamID))
+			m.logger.Error("Failed to update heartbeat", zap.Error(err), zap.Int("stream_id", streamID))
 		}
 	}
 }
 
-func (m *Manager) monitorProcess(streamID string, cmd *exec.Cmd) {
+func (m *Manager) monitorProcess(streamID int, cmd *exec.Cmd) {
 	err := cmd.Wait()
 	m.mutex.Lock()
 	defer m.mutex.Unlock()
@@ -237,9 +249,10 @@ func (m *Manager) monitorProcess(streamID string, cmd *exec.Cmd) {
 
 	if err != nil {
 		m.logger.Error("Process exited with error",
-		zap.Error(err),
-		zap.String("stream_id", streamID))
+			zap.Error(err),
+			zap.Int("stream_id", streamID),
+		)
 	} else {
-		m.logger.Info("Process exited cleanly", zap.String("stream_id", streamID))
+		m.logger.Info("Process exited cleanly", zap.Int("stream_id", streamID))
 	}
 }
