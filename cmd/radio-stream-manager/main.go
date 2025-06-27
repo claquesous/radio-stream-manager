@@ -16,7 +16,19 @@ import (
 )
 
 func main() {
-	logger, err := zap.NewProduction()
+	logLevel := os.Getenv("LOG_LEVEL")
+	var cfgZap zap.Config
+	if logLevel == "debug" {
+		cfgZap = zap.NewDevelopmentConfig()
+	} else {
+		cfgZap = zap.NewProductionConfig()
+	}
+	if logLevel != "" {
+		if err := cfgZap.Level.UnmarshalText([]byte(logLevel)); err != nil {
+			log.Printf("Invalid LOG_LEVEL: %v, defaulting to %v", logLevel, cfgZap.Level)
+		}
+	}
+	logger, err := cfgZap.Build()
 	if err != nil {
 		log.Fatalf("Failed to create logger: %v", err)
 	}
