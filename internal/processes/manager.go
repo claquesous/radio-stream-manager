@@ -129,6 +129,10 @@ func (m *Manager) StartStream(ctx context.Context, event types.StreamEvent) erro
 		zap.Int("pid", cmd.Process.Pid),
 		zap.String("config_path", configPath),
 	)
+	m.logger.Debug("Stream process environment",
+		zap.Int("stream_id", streamID),
+		zap.Strings("env", cmd.Env),
+	)
 
 	// Monitor process in background
 	go m.monitorProcess(streamID, cmd)
