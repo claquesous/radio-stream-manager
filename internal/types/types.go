@@ -3,13 +3,13 @@ package types
 import "time"
 
 type StreamEvent struct {
-	EventType string        `json:"event_type"`
-	StreamID  int           `json:"stream_id"`
-	Timestamp time.Time     `json:"timestamp"`
-	Payload   StreamPayload `json:"payload"`
+	EventType string       `json:"event_type"`
+	StreamID  int          `json:"stream_id"`
+	Timestamp time.Time    `json:"timestamp"`
+	Config    StreamConfig `json:"config"`
 }
 
-type StreamPayload struct {
+type StreamConfig struct {
 	Name        string `json:"name"`
 	Premium     bool   `json:"premium"`
 	Description string `json:"description"`

@@ -49,6 +49,11 @@ func main() {
 
 	processManager := processes.NewManager(cfg, stateManager, logger)
 
+	// Restore previously running streams after startup
+	if err := processManager.RestoreStreams(ctx); err != nil {
+		logger.Error("Failed to restore streams", zap.Error(err))
+	}
+
 	eventConsumer, err := events.NewSQSConsumer(cfg, processManager, logger)
 	if err != nil {
 		logger.Fatal("Failed to create event consumer", zap.Error(err))
