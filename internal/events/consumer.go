@@ -95,16 +95,16 @@ func (c *SQSConsumer) processMessage(ctx context.Context, message awstypes.Messa
 	}
 
 	c.logger.Info("Processing stream event",
-	zap.String("event_type", event.EventType),
-	zap.Int("stream_id", event.StreamID))
+		zap.String("event_type", event.EventType),
+		zap.Int("stream_id", event.StreamID))
 
 	switch event.EventType {
 	case types.EventStreamCreated:
-		return c.processManager.StartStream(ctx, event)
+		return c.processManager.StartStream(ctx, event.StreamID, event.Config)
 	case types.EventStreamDestroyed:
 		return c.processManager.StopStream(ctx, event.StreamID)
 	case types.EventStreamUpdated:
-		return c.processManager.UpdateStream(ctx, event)
+		return c.processManager.UpdateStream(ctx, event.StreamID, event.Config)
 	default:
 		c.logger.Warn("Unknown event type", zap.String("event_type", event.EventType))
 		return nil

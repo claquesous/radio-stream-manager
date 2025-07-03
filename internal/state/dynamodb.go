@@ -26,6 +26,10 @@ type StreamProcess struct {
 	CreatedAt     time.Time `dynamodbav:"created_at"`
 	LastHeartbeat time.Time `dynamodbav:"last_heartbeat"`
 	ErrorMessage  string    `dynamodbav:"error_message,omitempty"`
+	Name          string    `dynamodbav:"name"`
+	Premium       bool      `dynamodbav:"premium"`
+	Description   string    `dynamodbav:"description"`
+	Genre         string    `dynamodbav:"genre"`
 }
 
 const (

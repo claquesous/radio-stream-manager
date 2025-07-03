@@ -42,11 +42,9 @@ func NewManager(cfg *config.Config, stateManager *state.DynamoDBManager, logger 
 	}
 }
 
-func (m *Manager) StartStream(ctx context.Context, event types.StreamEvent) error {
+func (m *Manager) StartStream(ctx context.Context, streamID int, config types.StreamConfig) error {
 	m.mutex.Lock()
 	defer m.mutex.Unlock()
-
-	streamID := event.StreamID
 
 	if _, exists := m.processes[streamID]; exists {
 		m.logger.Warn("Stream already running", zap.Int("stream_id", streamID))
@@ -56,12 +54,12 @@ func (m *Manager) StartStream(ctx context.Context, event types.StreamEvent) erro
 	// Generate ices configuration
 	icesConfig := &templates.IcesConfig{
 		StreamID:        streamID,
-		StreamName:      event.Payload.Name,
+		StreamName:      config.Name,
 		IcecastHost:     m.config.Icecast.Host,
 		IcecastPort:     m.config.Icecast.Port,
 		IcecastPassword: m.config.Icecast.Password,
-		Genre:           event.Payload.Genre,
-		Description:     event.Payload.Description,
+		Genre:           config.Genre,
+		Description:     config.Description,
 		URL:             fmt.Sprintf("%s/s/%d", m.config.API.BaseURL, streamID),
 	}
 
@@ -72,7 +70,7 @@ func (m *Manager) StartStream(ctx context.Context, event types.StreamEvent) erro
 	// Set template values
 	icesConfig.BaseDirectory = logDir
 	icesConfig.Mountpoint = fmt.Sprintf("/stream-%d", streamID)
-	if event.Payload.Premium {
+	if config.Premium {
 		icesConfig.Bitrate = 128
 	} else {
 		icesConfig.Bitrate = 64
@@ -118,6 +116,10 @@ func (m *Manager) StartStream(ctx context.Context, event types.StreamEvent) erro
 		Mountpoint:    icesConfig.Mountpoint,
 		CreatedAt:     time.Now(),
 		LastHeartbeat: time.Now(),
+		Name:          config.Name,
+		Premium:       config.Premium,
+		Description:   config.Description,
+		Genre:         config.Genre,
 	}
 
 	if err := m.stateManager.SaveProcess(ctx, streamProcess); err != nil {
@@ -179,15 +181,15 @@ func (m *Manager) StopStream(ctx context.Context, streamID int) error {
 	return nil
 }
 
-func (m *Manager) UpdateStream(ctx context.Context, event types.StreamEvent) error {
+func (m *Manager) UpdateStream(ctx context.Context, streamID int, config types.StreamConfig) error {
 	// For now, restart the stream with new configuration
-	if err := m.StopStream(ctx, event.StreamID); err != nil {
+	if err := m.StopStream(ctx, streamID); err != nil {
 		return fmt.Errorf("failed to stop stream for update: %w", err)
 	}
 
 	time.Sleep(2 * time.Second) // Give time for cleanup
 
-	return m.StartStream(ctx, event)
+	return m.StartStream(ctx, streamID, config)
 }
 
 func (m *Manager) StopAll() error {
@@ -211,6 +213,64 @@ func (m *Manager) StopAll() error {
 	}
 
 	m.processes = make(map[int]*ProcessInfo)
+	return nil
+}
+
+func (m *Manager) RestoreStreams(ctx context.Context) error {
+	m.logger.Info("Restoring streams from state storage")
+
+	processes, err := m.stateManager.ListProcesses(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to list processes: %w", err)
+	}
+
+	for _, process := range processes {
+		if process.Status != state.StatusRunning {
+			continue
+		}
+
+		// Check if PID exists and is an ices process
+		pid := process.ProcessID
+		procPath := fmt.Sprintf("/proc/%d/cmdline", pid)
+		cmdline, err := os.ReadFile(procPath)
+		if err == nil && len(cmdline) > 0 && (string(cmdline) == m.config.Ices.BinaryPath || string(cmdline[:len(m.config.Ices.BinaryPath)]) == m.config.Ices.BinaryPath) {
+			m.logger.Info("Reattaching to existing ices process",
+				zap.Int("stream_id", process.StreamID),
+				zap.Int("pid", pid),
+				zap.String("name", process.Name),
+			)
+			processInfo := &ProcessInfo{
+				StreamID: process.StreamID,
+				Process:  &os.Process{Pid: pid},
+				Config:   nil,
+				Started:  process.CreatedAt,
+			}
+			m.processes[process.StreamID] = processInfo
+			continue
+		}
+
+		m.logger.Info("Restoring stream",
+			zap.Int("stream_id", process.StreamID),
+			zap.String("name", process.Name),
+		)
+
+		config := types.StreamConfig{
+			Name:        process.Name,
+			Genre:       process.Genre,
+			Description: process.Description,
+			Premium:     process.Premium,
+		}
+
+		if err := m.StartStream(ctx, process.StreamID, config); err != nil {
+			m.logger.Error("Failed to restore stream",
+				zap.Error(err),
+				zap.Int("stream_id", process.StreamID),
+			)
+			continue
+		}
+	}
+
+	m.logger.Info("Stream restoration complete")
 	return nil
 }
 
@@ -252,6 +312,51 @@ func (m *Manager) monitorProcess(streamID int, cmd *exec.Cmd) {
 			zap.Error(err),
 			zap.Int("stream_id", streamID),
 		)
+		// Attempt restart
+		go func() {
+			const maxRetries = 3
+			const retryDelay = 5 * time.Second
+			for i := 1; i <= maxRetries; i++ {
+				m.logger.Info("Attempting to restart stream",
+					zap.Int("stream_id", streamID),
+					zap.Int("attempt", i),
+				)
+				// Try to get last known config from DynamoDB
+				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				defer cancel()
+				streamProcess, err := m.stateManager.GetProcess(ctx, streamID)
+				if err != nil || streamProcess == nil {
+					m.logger.Error("Failed to get stream process for restart",
+						zap.Error(err),
+						zap.Int("stream_id", streamID),
+					)
+					time.Sleep(retryDelay)
+					continue
+				}
+				// Reconstruct config for restart
+				config := types.StreamConfig{
+					Name:        streamProcess.Name,
+					Genre:       streamProcess.Genre,
+					Description: streamProcess.Description,
+					Premium:     streamProcess.Premium,
+				}
+				restartErr := m.StartStream(ctx, streamID, config)
+				if restartErr == nil {
+					m.logger.Info("Successfully restarted stream",
+						zap.Int("stream_id", streamID),
+						zap.Int("attempt", i),
+					)
+					return
+				}
+				m.logger.Error("Restart attempt failed",
+					zap.Error(restartErr),
+					zap.Int("stream_id", streamID),
+					zap.Int("attempt", i),
+				)
+				time.Sleep(retryDelay)
+			}
+			m.logger.Error("Failed to restart stream after max retries", zap.Int("stream_id", streamID))
+		}()
 	} else {
 		m.logger.Info("Process exited cleanly", zap.Int("stream_id", streamID))
 	}
