@@ -182,7 +182,32 @@ func (m *Manager) StopStream(ctx context.Context, streamID int) error {
 }
 
 func (m *Manager) UpdateStream(ctx context.Context, streamID int, config types.StreamConfig) error {
-  // For now, restart the stream with new configuration
+  m.mutex.RLock()
+  _, running := m.processes[streamID]
+  m.mutex.RUnlock()
+
+  if running {
+    m.logger.Warn("Stream already running", zap.Int("stream_id", streamID))
+    // Only update StreamConfig fields in DynamoDB state
+    ctxTimeout, cancel := context.WithTimeout(ctx, 5*time.Second)
+    defer cancel()
+    streamProcess, err := m.stateManager.GetProcess(ctxTimeout, streamID)
+    if err != nil || streamProcess == nil {
+      m.logger.Error("Failed to get process state for update", zap.Error(err))
+      return fmt.Errorf("failed to get process state for update: %w", err)
+    }
+    streamProcess.Name = config.Name
+    streamProcess.Genre = config.Genre
+    streamProcess.Description = config.Description
+    streamProcess.Premium = config.Premium
+    if err := m.stateManager.SaveProcess(ctx, streamProcess); err != nil {
+      m.logger.Error("Failed to save process state", zap.Error(err))
+    }
+    m.logger.Info("Updated StreamConfig fields for running stream", zap.Int("stream_id", streamID))
+    return nil
+  }
+
+  // If not running, restart the stream
   if err := m.StopStream(ctx, streamID); err != nil {
     return fmt.Errorf("failed to stop stream for update: %w", err)
   }
@@ -314,48 +339,69 @@ func (m *Manager) monitorProcess(streamID int, cmd *exec.Cmd) {
     )
     // Attempt restart
     go func() {
-      const maxRetries = 3
-      const retryDelay = 5 * time.Second
-      for i := 1; i <= maxRetries; i++ {
+      const maxIcesCrashes = 5
+      const maxBackoff = 5 * time.Minute
+      icesCrashes := 0
+
+      for {
+        // Phase 1: wait for DynamoDB to be available with exponential backoff.
+        // This does not count against the ices crash limit.
+        var streamProcess *state.StreamProcess
+        backoff := 5 * time.Second
+        for {
+          lookupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+          streamProcess, err = m.stateManager.GetProcess(lookupCtx, streamID)
+          cancel()
+          if err == nil && streamProcess != nil {
+            break
+          }
+          m.logger.Warn("DynamoDB unavailable, will retry",
+            zap.Int("stream_id", streamID),
+            zap.Duration("backoff", backoff),
+            zap.Error(err),
+          )
+          time.Sleep(backoff)
+          if backoff < maxBackoff {
+            backoff *= 2
+            if backoff > maxBackoff {
+              backoff = maxBackoff
+            }
+          }
+        }
+
+        // Phase 2: try to start ices. This counts against crash limit.
+        icesCrashes++
         m.logger.Info("Attempting to restart stream",
           zap.Int("stream_id", streamID),
-          zap.Int("attempt", i),
+          zap.Int("attempt", icesCrashes),
         )
-        // Try to get last known config from DynamoDB
-        ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-        defer cancel()
-        streamProcess, err := m.stateManager.GetProcess(ctx, streamID)
-        if err != nil || streamProcess == nil {
-          m.logger.Error("Failed to get stream process for restart",
-            zap.Error(err),
-            zap.Int("stream_id", streamID),
-          )
-          time.Sleep(retryDelay)
-          continue
-        }
-        // Reconstruct config for restart
         config := types.StreamConfig{
           Name:        streamProcess.Name,
           Genre:       streamProcess.Genre,
           Description: streamProcess.Description,
           Premium:     streamProcess.Premium,
         }
-        restartErr := m.StartStream(ctx, streamID, config)
+        restartErr := m.StartStream(context.Background(), streamID, config)
         if restartErr == nil {
           m.logger.Info("Successfully restarted stream",
             zap.Int("stream_id", streamID),
-            zap.Int("attempt", i),
+            zap.Int("attempt", icesCrashes),
           )
           return
         }
         m.logger.Error("Restart attempt failed",
           zap.Error(restartErr),
           zap.Int("stream_id", streamID),
-          zap.Int("attempt", i),
+          zap.Int("attempt", icesCrashes),
         )
-        time.Sleep(retryDelay)
+        if icesCrashes >= maxIcesCrashes {
+          m.logger.Error("Failed to restart stream after max ices crashes, giving up",
+            zap.Int("stream_id", streamID),
+          )
+          return
+        }
+        time.Sleep(5 * time.Second)
       }
-      m.logger.Error("Failed to restart stream after max retries", zap.Int("stream_id", streamID))
     }()
   } else {
     m.logger.Info("Process exited cleanly", zap.Int("stream_id", streamID))
