@@ -1,8 +1,10 @@
 package processes
 
 import (
+  "bufio"
   "context"
   "fmt"
+  "io"
   "os"
   "os/exec"
   "path/filepath"
@@ -81,9 +83,17 @@ func (m *Manager) StartStream(ctx context.Context, streamID int, config types.St
     return fmt.Errorf("failed to generate ices config: %w", err)
   }
 
-  // Create log directory
+  // Create log directory and redirect ices.log to /dev/null so it doesn't grow on disk.
+  // ices always writes to BaseDirectory/ices.log regardless of Verbose; we capture
+  // its stdout/stderr instead for consolidated structured logging.
   if err := os.MkdirAll(logDir, 0755); err != nil {
     return fmt.Errorf("failed to create log directory: %w", err)
+  }
+  icesLogPath := filepath.Join(logDir, "ices.log")
+  // Remove any existing file before symlinking (ignore error if it doesn't exist)
+  _ = os.Remove(icesLogPath)
+  if err := os.Symlink("/dev/null", icesLogPath); err != nil {
+    m.logger.Warn("Failed to symlink ices.log to /dev/null", zap.Error(err), zap.Int("stream_id", streamID))
   }
 
   // Start ices process
@@ -94,9 +104,21 @@ func (m *Manager) StartStream(ctx context.Context, streamID int, config types.St
     fmt.Sprintf("PERLLIB=%s/modules", m.config.Ices.ConfigDir),
   )
 
+  stdoutPipe, err := cmd.StdoutPipe()
+  if err != nil {
+    return fmt.Errorf("failed to create stdout pipe: %w", err)
+  }
+  stderrPipe, err := cmd.StderrPipe()
+  if err != nil {
+    return fmt.Errorf("failed to create stderr pipe: %w", err)
+  }
+
   if err := cmd.Start(); err != nil {
     return fmt.Errorf("failed to start ices process: %w", err)
   }
+
+  go m.forwardLogs(streamID, stdoutPipe, false)
+  go m.forwardLogs(streamID, stderrPipe, true)
 
   // Store process info
   processInfo := &ProcessInfo{
@@ -320,6 +342,18 @@ func (m *Manager) healthCheck(ctx context.Context) {
   for streamID := range m.processes {
     if err := m.stateManager.UpdateHeartbeat(ctx, streamID); err != nil {
       m.logger.Error("Failed to update heartbeat", zap.Error(err), zap.Int("stream_id", streamID))
+    }
+  }
+}
+
+func (m *Manager) forwardLogs(streamID int, r io.Reader, isStderr bool) {
+  scanner := bufio.NewScanner(r)
+  for scanner.Scan() {
+    line := scanner.Text()
+    if isStderr {
+      m.logger.Error("ices", zap.Int("stream_id", streamID), zap.String("output", line))
+    } else {
+      m.logger.Info("ices", zap.Int("stream_id", streamID), zap.String("output", line))
     }
   }
 }
