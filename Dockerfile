@@ -11,6 +11,7 @@ RUN apt-get update -qq && \
       build-essential \
       autoconf \
       automake \
+      autotools-dev \
       libtool \
       libshout3-dev \
       libmp3lame-dev \
@@ -26,6 +27,7 @@ RUN apt-get update -qq && \
 RUN curl -fsSL https://downloads.xiph.org/releases/ices/ices-0.4.tar.gz \
       | tar -xz -C /tmp && \
     cd /tmp/ices-0.4 && \
+    cp /usr/share/misc/config.guess /usr/share/misc/config.sub . && \
     ./configure \
       --with-perl \
       --with-lame \
