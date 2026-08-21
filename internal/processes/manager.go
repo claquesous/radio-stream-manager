@@ -3,8 +3,10 @@ package processes
 import (
   "bufio"
   "context"
+  "encoding/json"
   "fmt"
   "io"
+  "net/http"
   "os"
   "os/exec"
   "path/filepath"
@@ -26,6 +28,7 @@ type Manager struct {
   logger       *zap.Logger
   processes    map[int]*ProcessInfo
   mutex        sync.RWMutex
+  httpClient   *http.Client
 }
 
 type ProcessInfo struct {
@@ -41,6 +44,7 @@ func NewManager(cfg *config.Config, stateManager *state.DynamoDBManager, logger 
     stateManager: stateManager,
     logger:       logger,
     processes:    make(map[int]*ProcessInfo),
+    httpClient:   &http.Client{Timeout: 10 * time.Second},
   }
 }
 
@@ -331,6 +335,7 @@ func (m *Manager) StartHealthMonitor(ctx context.Context) {
       return
     case <-ticker.C:
       m.healthCheck(ctx)
+      m.ReconcileWithBackend(ctx)
     }
   }
 }
@@ -342,6 +347,94 @@ func (m *Manager) healthCheck(ctx context.Context) {
   for streamID := range m.processes {
     if err := m.stateManager.UpdateHeartbeat(ctx, streamID); err != nil {
       m.logger.Error("Failed to update heartbeat", zap.Error(err), zap.Int("stream_id", streamID))
+    }
+  }
+}
+
+// enabledStream mirrors the shape rendered by GET /private/streams
+// (radio-backend's StreamsController#enabled).
+type enabledStream struct {
+  ID          int    `json:"id"`
+  Name        string `json:"name"`
+  Premium     bool   `json:"premium"`
+  Description string `json:"description"`
+  Genre       string `json:"genre"`
+}
+
+// ReconcileWithBackend asks backend (the source of truth for Stream#enabled)
+// which streams should be running and starts any that aren't, and stops
+// any running stream that's no longer enabled. This is what recovers a
+// stream that monitorProcess gave up on after exhausting maxIcesCrashes,
+// and what recovers streams after DynamoDB state was lost or never restored.
+func (m *Manager) ReconcileWithBackend(ctx context.Context) {
+  url := fmt.Sprintf("%s/private/streams", m.config.API.BaseURL)
+  req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+  if err != nil {
+    m.logger.Error("Failed to build reconciliation request", zap.Error(err))
+    return
+  }
+  req.Header.Set("Accept", "application/json")
+
+  resp, err := m.httpClient.Do(req)
+  if err != nil {
+    m.logger.Error("Failed to reach backend for reconciliation", zap.Error(err))
+    return
+  }
+  defer resp.Body.Close()
+
+  if resp.StatusCode != http.StatusOK {
+    m.logger.Error("Unexpected status from backend during reconciliation",
+      zap.Int("status", resp.StatusCode))
+    return
+  }
+
+  var enabledStreams []enabledStream
+  if err := json.NewDecoder(resp.Body).Decode(&enabledStreams); err != nil {
+    m.logger.Error("Failed to decode reconciliation response", zap.Error(err))
+    return
+  }
+
+  enabledByID := make(map[int]enabledStream, len(enabledStreams))
+  for _, s := range enabledStreams {
+    enabledByID[s.ID] = s
+  }
+
+  m.mutex.RLock()
+  var toStart []enabledStream
+  for _, s := range enabledStreams {
+    if _, running := m.processes[s.ID]; !running {
+      toStart = append(toStart, s)
+    }
+  }
+  var toStop []int
+  for streamID := range m.processes {
+    if _, stillEnabled := enabledByID[streamID]; !stillEnabled {
+      toStop = append(toStop, streamID)
+    }
+  }
+  m.mutex.RUnlock()
+
+  for _, s := range toStart {
+    m.logger.Info("Reconciliation: starting enabled stream that isn't running",
+      zap.Int("stream_id", s.ID))
+    config := types.StreamConfig{
+      Name:        s.Name,
+      Premium:     s.Premium,
+      Description: s.Description,
+      Genre:       s.Genre,
+    }
+    if err := m.StartStream(ctx, s.ID, config); err != nil {
+      m.logger.Error("Reconciliation: failed to start stream",
+        zap.Error(err), zap.Int("stream_id", s.ID))
+    }
+  }
+
+  for _, streamID := range toStop {
+    m.logger.Info("Reconciliation: stopping stream that's no longer enabled",
+      zap.Int("stream_id", streamID))
+    if err := m.StopStream(ctx, streamID); err != nil {
+      m.logger.Error("Reconciliation: failed to stop stream",
+        zap.Error(err), zap.Int("stream_id", streamID))
     }
   }
 }

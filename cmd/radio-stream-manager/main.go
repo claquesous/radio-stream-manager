@@ -54,6 +54,10 @@ func main() {
     logger.Error("Failed to restore streams", zap.Error(err))
   }
 
+  // Reconcile against backend in case DynamoDB state was empty, stale,
+  // or missing streams RestoreStreams couldn't account for.
+  processManager.ReconcileWithBackend(ctx)
+
   eventConsumer, err := events.NewSQSConsumer(cfg, processManager, logger)
   if err != nil {
     logger.Fatal("Failed to create event consumer", zap.Error(err))
