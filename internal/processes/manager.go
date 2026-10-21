@@ -27,6 +27,7 @@ type Manager struct {
   stateManager *state.DynamoDBManager
   logger       *zap.Logger
   processes    map[int]*ProcessInfo
+  crashes      map[int]int // consecutive ices crashes per stream
   mutex        sync.RWMutex
   httpClient   *http.Client
 }
@@ -44,6 +45,7 @@ func NewManager(cfg *config.Config, stateManager *state.DynamoDBManager, logger 
     stateManager: stateManager,
     logger:       logger,
     processes:    make(map[int]*ProcessInfo),
+    crashes:      make(map[int]int),
     httpClient:   &http.Client{Timeout: 10 * time.Second},
   }
 }
@@ -166,7 +168,7 @@ func (m *Manager) StartStream(ctx context.Context, streamID int, config types.St
   )
 
   // Monitor process in background
-  go m.monitorProcess(streamID, cmd)
+  go m.monitorProcess(streamID, cmd, processInfo.Started)
 
   return nil
 }
@@ -192,6 +194,7 @@ func (m *Manager) StopStream(ctx context.Context, streamID int) error {
 
   // Clean up
   delete(m.processes, streamID)
+  delete(m.crashes, streamID)
 
   // Remove from DynamoDB
   if err := m.stateManager.DeleteProcess(ctx, streamID); err != nil {
@@ -453,7 +456,17 @@ func (m *Manager) forwardLogs(streamID int, r io.Reader, isStderr bool) {
   }
 }
 
-func (m *Manager) monitorProcess(streamID int, cmd *exec.Cmd) {
+const (
+  maxIcesCrashes = 5
+  // An ices that ran at least this long before dying gets a fresh crash budget.
+  healthyRunTime = time.Minute
+  restartBackoff = 5 * time.Second
+  // Reconciliation restarts any enabled stream that isn't running every 30s,
+  // so backing off longer than that would be moot.
+  maxRestartBackoff = 30 * time.Second
+)
+
+func (m *Manager) monitorProcess(streamID int, cmd *exec.Cmd, started time.Time) {
   err := cmd.Wait()
   m.mutex.Lock()
   defer m.mutex.Unlock()
@@ -461,78 +474,93 @@ func (m *Manager) monitorProcess(streamID int, cmd *exec.Cmd) {
   // Remove from active processes
   delete(m.processes, streamID)
 
-  if err != nil {
-    m.logger.Error("Process exited with error",
-      zap.Error(err),
+  if err == nil {
+    delete(m.crashes, streamID)
+    m.logger.Info("Process exited cleanly", zap.Int("stream_id", streamID))
+    return
+  }
+
+  // Count crashes per stream, not per restart attempt: every restarted ices
+  // gets its own monitorProcess, so a local counter would never reach the
+  // limit and an ices that dies on startup (e.g. the backend isn't accepting
+  // connections yet after a reboot) would be respawned in a tight loop.
+  if time.Since(started) >= healthyRunTime {
+    m.crashes[streamID] = 0
+  }
+  m.crashes[streamID]++
+  crashes := m.crashes[streamID]
+
+  m.logger.Error("Process exited with error",
+    zap.Error(err),
+    zap.Int("stream_id", streamID),
+    zap.Int("consecutive_crashes", crashes),
+  )
+  if crashes > maxIcesCrashes {
+    m.logger.Error("Too many consecutive ices crashes, leaving the stream to reconciliation",
       zap.Int("stream_id", streamID),
     )
-    // Attempt restart
-    go func() {
-      const maxIcesCrashes = 5
-      const maxBackoff = 5 * time.Minute
-      icesCrashes := 0
-
-      for {
-        // Phase 1: wait for DynamoDB to be available with exponential backoff.
-        // This does not count against the ices crash limit.
-        var streamProcess *state.StreamProcess
-        backoff := 5 * time.Second
-        for {
-          lookupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-          streamProcess, err = m.stateManager.GetProcess(lookupCtx, streamID)
-          cancel()
-          if err == nil && streamProcess != nil {
-            break
-          }
-          m.logger.Warn("DynamoDB unavailable, will retry",
-            zap.Int("stream_id", streamID),
-            zap.Duration("backoff", backoff),
-            zap.Error(err),
-          )
-          time.Sleep(backoff)
-          if backoff < maxBackoff {
-            backoff *= 2
-            if backoff > maxBackoff {
-              backoff = maxBackoff
-            }
-          }
-        }
-
-        // Phase 2: try to start ices. This counts against crash limit.
-        icesCrashes++
-        m.logger.Info("Attempting to restart stream",
-          zap.Int("stream_id", streamID),
-          zap.Int("attempt", icesCrashes),
-        )
-        config := types.StreamConfig{
-          Name:        streamProcess.Name,
-          Genre:       streamProcess.Genre,
-          Description: streamProcess.Description,
-          Premium:     streamProcess.Premium,
-        }
-        restartErr := m.StartStream(context.Background(), streamID, config)
-        if restartErr == nil {
-          m.logger.Info("Successfully restarted stream",
-            zap.Int("stream_id", streamID),
-            zap.Int("attempt", icesCrashes),
-          )
-          return
-        }
-        m.logger.Error("Restart attempt failed",
-          zap.Error(restartErr),
-          zap.Int("stream_id", streamID),
-          zap.Int("attempt", icesCrashes),
-        )
-        if icesCrashes >= maxIcesCrashes {
-          m.logger.Error("Failed to restart stream after max ices crashes, giving up",
-            zap.Int("stream_id", streamID),
-          )
-          return
-        }
-        time.Sleep(5 * time.Second)
-      }
-    }()
-  } else {
-    m.logger.Info("Process exited cleanly", zap.Int("stream_id", streamID))
+    return
   }
+
+  backoff := restartBackoff << (crashes - 1)
+  if backoff > maxRestartBackoff {
+    backoff = maxRestartBackoff
+  }
+  go m.restartStream(streamID, crashes, backoff)
+}
+
+func (m *Manager) restartStream(streamID int, attempt int, backoff time.Duration) {
+  time.Sleep(backoff)
+
+  // Wait for DynamoDB to be available with exponential backoff.
+  // This does not count against the ices crash limit.
+  const maxDynamoBackoff = 5 * time.Minute
+  var streamProcess *state.StreamProcess
+  var err error
+  dynamoBackoff := 5 * time.Second
+  for {
+    lookupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+    streamProcess, err = m.stateManager.GetProcess(lookupCtx, streamID)
+    cancel()
+    if err == nil && streamProcess != nil {
+      break
+    }
+    m.logger.Warn("DynamoDB unavailable, will retry",
+      zap.Int("stream_id", streamID),
+      zap.Duration("backoff", dynamoBackoff),
+      zap.Error(err),
+    )
+    time.Sleep(dynamoBackoff)
+    if dynamoBackoff < maxDynamoBackoff {
+      dynamoBackoff *= 2
+      if dynamoBackoff > maxDynamoBackoff {
+        dynamoBackoff = maxDynamoBackoff
+      }
+    }
+  }
+
+  m.logger.Info("Attempting to restart stream",
+    zap.Int("stream_id", streamID),
+    zap.Int("attempt", attempt),
+  )
+  config := types.StreamConfig{
+    Name:        streamProcess.Name,
+    Genre:       streamProcess.Genre,
+    Description: streamProcess.Description,
+    Premium:     streamProcess.Premium,
+  }
+  // context.Background(), not a cancellable context: StartStream spawns ices
+  // with exec.CommandContext, so cancelling it would kill the new process.
+  if err := m.StartStream(context.Background(), streamID, config); err != nil {
+    m.logger.Error("Restart attempt failed, leaving the stream to reconciliation",
+      zap.Error(err),
+      zap.Int("stream_id", streamID),
+      zap.Int("attempt", attempt),
+    )
+    return
+  }
+  m.logger.Info("Successfully restarted stream",
+    zap.Int("stream_id", streamID),
+    zap.Int("attempt", attempt),
+  )
 }
