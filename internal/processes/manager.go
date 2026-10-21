@@ -102,11 +102,12 @@ func (m *Manager) StartStream(ctx context.Context, streamID int, config types.St
 
   // Start ices process
   cmd := exec.CommandContext(ctx, m.config.Ices.BinaryPath, "-c", configPath)
-  cmd.Env = append(os.Environ(),
+  streamEnv := []string{
     fmt.Sprintf("STREAM_ID=%d", streamID),
     fmt.Sprintf("CLAQRADIO_STREAM_URL=%s", m.config.API.BaseURL),
     fmt.Sprintf("PERLLIB=%s/modules", m.config.Ices.ConfigDir),
-  )
+  }
+  cmd.Env = append(os.Environ(), streamEnv...)
 
   stdoutPipe, err := cmd.StdoutPipe()
   if err != nil {
@@ -160,7 +161,8 @@ func (m *Manager) StartStream(ctx context.Context, streamID int, config types.St
   m.logger.Debug("Stream process command and environment",
     zap.Int("stream_id", streamID),
     zap.String("command", cmd.String()),
-    zap.Strings("env", cmd.Env),
+    // Only the stream-specific vars: the inherited environment holds AWS credentials.
+    zap.Strings("env", streamEnv),
   )
 
   // Monitor process in background
