@@ -287,7 +287,7 @@ func (m *Manager) RestoreStreams(ctx context.Context) error {
     }
 
     pid := process.ProcessID
-    if runsBinary(pid, m.config.Ices.BinaryPath) {
+    if runsStream(pid, m.config.Ices.BinaryPath, process.StreamID) {
       m.logger.Info("Reattaching to existing ices process",
         zap.Int("stream_id", process.StreamID),
         zap.Int("pid", pid),
@@ -328,16 +328,31 @@ func (m *Manager) RestoreStreams(ctx context.Context) error {
   return nil
 }
 
-// runsBinary reports whether pid is a live process started as binaryPath.
-// After a reboot the PID in DynamoDB may belong to anything, with a command
-// line shorter than binaryPath.
-func runsBinary(pid int, binaryPath string) bool {
+// runsStream reports whether pid is a live process started as binaryPath
+// for streamID. After a reboot or a container restart the PID in DynamoDB
+// may belong to anything, with a command line shorter than binaryPath, or to
+// another stream's process, which has the same binary: so match the
+// STREAM_ID the manager put in its environment too.
+func runsStream(pid int, binaryPath string, streamID int) bool {
   cmdline, err := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid))
   if err != nil {
     return false
   }
   argv0, _, _ := strings.Cut(string(cmdline), "\x00")
-  return argv0 == binaryPath
+  if argv0 != binaryPath {
+    return false
+  }
+  environ, err := os.ReadFile(fmt.Sprintf("/proc/%d/environ", pid))
+  if err != nil {
+    return false
+  }
+  want := fmt.Sprintf("STREAM_ID=%d", streamID)
+  for _, kv := range strings.Split(string(environ), "\x00") {
+    if kv == want {
+      return true
+    }
+  }
+  return false
 }
 
 func (m *Manager) StartHealthMonitor(ctx context.Context) {
