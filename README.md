@@ -1,21 +1,21 @@
 # Radio Stream Manager
 
-A Go-based service that manages ices streaming processes for multiple radio streams in an event-driven architecture.
+A Go-based service that manages Liquidsoap streaming processes for multiple radio streams in an event-driven architecture.
 
 ## Architecture
 
-This service receives stream lifecycle events via AWS SQS and manages ices processes accordingly:
+This service receives stream lifecycle events via AWS SQS and manages Liquidsoap processes accordingly:
 
-- **Stream Created**: Spawns new ices process with unique configuration
-- **Stream Updated**: Restarts ices process with updated configuration
-- **Stream Destroyed**: Gracefully terminates ices process and cleans up
+- **Stream Created**: Spawns a Liquidsoap process for the stream
+- **Stream Updated**: Restarts the Liquidsoap process with updated configuration
+- **Stream Destroyed**: Gracefully terminates the Liquidsoap process
 
 ## Components
 
 - **Rails API**: Publishes stream events to SQS queue
 - **Stream Manager**: Go service that consumes events and manages processes
 - **DynamoDB**: Stores stream process state and metadata
-- **Ices**: Audio streaming processes (one per stream)
+- **Liquidsoap**: Audio streaming processes (one per stream, running `claqradio.liq`)
 - **Icecast**: Audio server with multiple mountpoints
 
 ## Quick Start
@@ -23,7 +23,7 @@ This service receives stream lifecycle events via AWS SQS and manages ices proce
 ### Prerequisites
 
 - Go 1.21+ (install via asdf)
-- ices2 package installed
+- Liquidsoap 2.4.6 from the upstream `.deb` (Debian trixie or Ubuntu noble, `ocaml4.14.2` build; Debian's own package is older)
 - AWS credentials configured
 - SQS queue and DynamoDB table set up
 
@@ -43,9 +43,12 @@ icecast:
 
 api:
   base_url: "http://localhost:3000"
+
+liquidsoap:
+  binary_path: /usr/bin/liquidsoap   # the default
 ```
 
-2. The system uses the included `ices-template.xml` as the ices template packaged with the Go service
+2. `claqradio.liq` must sit next to the binary. It takes each stream's config from env vars set by the manager.
 
 3. Edit `/etc/radio-stream-manager/environment`:
 ```bash
@@ -85,8 +88,8 @@ Events are published automatically when streams are created, updated, or destroy
 ## Stream Lifecycle
 
 1. **Create Stream**: Rails publishes `stream_created` event
-2. **Stream Manager**: Receives event, generates ices config, starts process
-3. **Ices Process**: Connects to icecast, requests songs from Rails API
+2. **Stream Manager**: Receives event, starts a Liquidsoap process
+3. **Liquidsoap Process**: Connects to icecast, requests songs from Rails API
 4. **Health Monitoring**: Regular heartbeats and process supervision
 5. **Destroy Stream**: Rails publishes `stream_destroyed` event, process terminated
 
@@ -111,14 +114,17 @@ Events are published automatically when streams are created, updated, or destroy
 # Service logs
 sudo journalctl -u radio-stream-manager
 
-# Individual stream logs
-tail -f /var/log/radio-stream-manager/stream-123/ices.log
+# One stream's Liquidsoap output (logged through the manager)
+sudo journalctl -u radio-stream-manager | grep '"stream_id":123'
+
+# Check the Liquidsoap script after editing it
+liquidsoap --check claqradio.liq
 ```
 
 ### Process Status
 ```bash
 # List running streams
-ps aux | grep ices
+ps aux | grep liquidsoap
 
 # Check DynamoDB records
 aws dynamodb scan --table-name stream_processes
@@ -144,7 +150,7 @@ aws sqs send-message \
 
 ### Common Issues
 
-1. **Process won't start**: Check ices binary path and permissions
+1. **Process won't start**: Check the liquidsoap binary path, permissions, and that `claqradio.liq` is next to the manager binary
 2. **No audio**: Verify icecast connection and mountpoint configuration
 3. **Memory usage**: Monitor process count and resource limits
 4. **SQS permissions**: Ensure IAM role has SQS and DynamoDB access

@@ -18,7 +18,6 @@ import (
   "radio-stream-manager/internal/config"
   "radio-stream-manager/internal/types"
   "radio-stream-manager/internal/state"
-  "radio-stream-manager/internal/templates"
 
   "go.uber.org/zap"
 )
@@ -28,7 +27,7 @@ type Manager struct {
   stateManager *state.DynamoDBManager
   logger       *zap.Logger
   processes    map[int]*ProcessInfo
-  crashes      map[int]int // consecutive ices crashes per stream
+  crashes      map[int]int // consecutive liquidsoap crashes per stream
   mutex        sync.RWMutex
   httpClient   *http.Client
 }
@@ -36,7 +35,6 @@ type Manager struct {
 type ProcessInfo struct {
   StreamID int
   Process  *os.Process
-  Config   *templates.IcesConfig
   Started  time.Time
 }
 
@@ -60,57 +58,30 @@ func (m *Manager) StartStream(ctx context.Context, streamID int, config types.St
     return nil
   }
 
-  // Generate ices configuration
-  icesConfig := &templates.IcesConfig{
-    StreamID:        streamID,
-    StreamName:      config.Name,
-    IcecastHost:     m.config.Icecast.Host,
-    IcecastPort:     m.config.Icecast.Port,
-    IcecastPassword: m.config.Icecast.Password,
-    Genre:           config.Genre,
-    Description:     config.Description,
-    URL:             fmt.Sprintf("%s/s/%d", m.config.API.BaseURL, streamID),
+  // claqradio.liq sits next to the binary and takes the whole stream config
+  // from env vars, so there's no per-stream config file to render.
+  scriptPath := filepath.Join(filepath.Dir(os.Args[0]), "claqradio.liq")
+  if _, err := os.Stat(scriptPath); err != nil {
+    return fmt.Errorf("failed to find liquidsoap script: %w", err)
   }
+  mountpoint := fmt.Sprintf("/stream-%d", streamID)
 
-  logDir := fmt.Sprintf("%s/stream-%d", m.config.Ices.LogDir, streamID)
-  configPath := fmt.Sprintf("%s/stream-%d.xml", m.config.Ices.ConfigDir, streamID)
-  templatePath := filepath.Join(filepath.Dir(os.Args[0]), "ices-template.xml")
-
-  // Set template values
-  icesConfig.BaseDirectory = logDir
-  icesConfig.Mountpoint = fmt.Sprintf("/stream-%d", streamID)
-  if config.Premium {
-    icesConfig.Bitrate = 128
-  } else {
-    icesConfig.Bitrate = 64
-  }
-
-  // Generate configuration file
-  if err := templates.GenerateIcesConfig(icesConfig, templatePath, configPath); err != nil {
-    return fmt.Errorf("failed to generate ices config: %w", err)
-  }
-
-  // Create log directory and redirect ices.log to /dev/null so it doesn't grow on disk.
-  // ices always writes to BaseDirectory/ices.log regardless of Verbose; we capture
-  // its stdout/stderr instead for consolidated structured logging.
-  if err := os.MkdirAll(logDir, 0755); err != nil {
-    return fmt.Errorf("failed to create log directory: %w", err)
-  }
-  icesLogPath := filepath.Join(logDir, "ices.log")
-  // Remove any existing file before symlinking (ignore error if it doesn't exist)
-  _ = os.Remove(icesLogPath)
-  if err := os.Symlink("/dev/null", icesLogPath); err != nil {
-    m.logger.Warn("Failed to symlink ices.log to /dev/null", zap.Error(err), zap.Int("stream_id", streamID))
-  }
-
-  // Start ices process
-  cmd := exec.CommandContext(ctx, m.config.Ices.BinaryPath, "-c", configPath)
+  // Start liquidsoap process
+  cmd := exec.CommandContext(ctx, m.config.Liquidsoap.BinaryPath, scriptPath)
   streamEnv := []string{
     fmt.Sprintf("STREAM_ID=%d", streamID),
     fmt.Sprintf("CLAQRADIO_STREAM_URL=%s", m.config.API.BaseURL),
-    fmt.Sprintf("PERLLIB=%s/modules", m.config.Ices.ConfigDir),
+    fmt.Sprintf("PREMIUM=%t", config.Premium),
+    fmt.Sprintf("STREAM_NAME=%s", config.Name),
+    fmt.Sprintf("STREAM_GENRE=%s", config.Genre),
+    fmt.Sprintf("STREAM_DESCRIPTION=%s", config.Description),
+    fmt.Sprintf("STREAM_URL=%s/s/%d", m.config.API.BaseURL, streamID),
+    fmt.Sprintf("ICECAST_HOST=%s", m.config.Icecast.Host),
+    fmt.Sprintf("ICECAST_PORT=%d", m.config.Icecast.Port),
   }
-  cmd.Env = append(os.Environ(), streamEnv...)
+  // The password stays out of streamEnv, which gets logged.
+  cmd.Env = append(append(os.Environ(), streamEnv...),
+    fmt.Sprintf("ICECAST_PASSWORD=%s", m.config.Icecast.Password))
 
   stdoutPipe, err := cmd.StdoutPipe()
   if err != nil {
@@ -122,7 +93,7 @@ func (m *Manager) StartStream(ctx context.Context, streamID int, config types.St
   }
 
   if err := cmd.Start(); err != nil {
-    return fmt.Errorf("failed to start ices process: %w", err)
+    return fmt.Errorf("failed to start liquidsoap process: %w", err)
   }
 
   go m.forwardLogs(streamID, stdoutPipe, false)
@@ -132,7 +103,6 @@ func (m *Manager) StartStream(ctx context.Context, streamID int, config types.St
   processInfo := &ProcessInfo{
     StreamID: streamID,
     Process:  cmd.Process,
-    Config:   icesConfig,
     Started:  time.Now(),
   }
   m.processes[streamID] = processInfo
@@ -142,8 +112,7 @@ func (m *Manager) StartStream(ctx context.Context, streamID int, config types.St
     StreamID:      streamID,
     Status:        state.StatusRunning,
     ProcessID:     cmd.Process.Pid,
-    ConfigPath:    configPath,
-    Mountpoint:    icesConfig.Mountpoint,
+    Mountpoint:    mountpoint,
     CreatedAt:     time.Now(),
     LastHeartbeat: time.Now(),
     Name:          config.Name,
@@ -159,7 +128,6 @@ func (m *Manager) StartStream(ctx context.Context, streamID int, config types.St
   m.logger.Info("Started stream",
     zap.Int("stream_id", streamID),
     zap.Int("pid", cmd.Process.Pid),
-    zap.String("config_path", configPath),
   )
   m.logger.Debug("Stream process command and environment",
     zap.Int("stream_id", streamID),
@@ -200,12 +168,6 @@ func (m *Manager) StopStream(ctx context.Context, streamID int) error {
   // Remove from DynamoDB
   if err := m.stateManager.DeleteProcess(ctx, streamID); err != nil {
     m.logger.Error("Failed to delete process state", zap.Error(err))
-  }
-
-  // Clean up config file
-  configPath := fmt.Sprintf("%s/stream-%d.xml", m.config.Ices.ConfigDir, streamID)
-  if err := os.Remove(configPath); err != nil {
-    m.logger.Warn("Failed to remove config file", zap.Error(err), zap.String("config_path", configPath))
   }
 
   m.logger.Info("Stopped stream", zap.Int("stream_id", streamID))
@@ -287,8 +249,8 @@ func (m *Manager) RestoreStreams(ctx context.Context) error {
     }
 
     pid := process.ProcessID
-    if runsStream(pid, m.config.Ices.BinaryPath, process.StreamID) {
-      m.logger.Info("Reattaching to existing ices process",
+    if runsStream(pid, m.config.Liquidsoap.BinaryPath, process.StreamID) {
+      m.logger.Info("Reattaching to existing liquidsoap process",
         zap.Int("stream_id", process.StreamID),
         zap.Int("pid", pid),
         zap.String("name", process.Name),
@@ -296,7 +258,6 @@ func (m *Manager) RestoreStreams(ctx context.Context) error {
       processInfo := &ProcessInfo{
         StreamID: process.StreamID,
         Process:  &os.Process{Pid: pid},
-        Config:   nil,
         Started:  process.CreatedAt,
       }
       m.processes[process.StreamID] = processInfo
@@ -394,7 +355,7 @@ type enabledStream struct {
 // ReconcileWithBackend asks backend (the source of truth for Stream#enabled)
 // which streams should be running and starts any that aren't, and stops
 // any running stream that's no longer enabled. This is what recovers a
-// stream that monitorProcess gave up on after exhausting maxIcesCrashes,
+// stream that monitorProcess gave up on after exhausting maxCrashes,
 // and what recovers streams after DynamoDB state was lost or never restored.
 func (m *Manager) ReconcileWithBackend(ctx context.Context) {
   url := fmt.Sprintf("%s/private/streams", m.config.API.BaseURL)
@@ -474,16 +435,16 @@ func (m *Manager) forwardLogs(streamID int, r io.Reader, isStderr bool) {
   for scanner.Scan() {
     line := scanner.Text()
     if isStderr {
-      m.logger.Error("ices", zap.Int("stream_id", streamID), zap.String("output", line))
+      m.logger.Error("liquidsoap", zap.Int("stream_id", streamID), zap.String("output", line))
     } else {
-      m.logger.Info("ices", zap.Int("stream_id", streamID), zap.String("output", line))
+      m.logger.Info("liquidsoap", zap.Int("stream_id", streamID), zap.String("output", line))
     }
   }
 }
 
 const (
-  maxIcesCrashes = 5
-  // An ices that ran at least this long before dying gets a fresh crash budget.
+  maxCrashes = 5
+  // A liquidsoap that ran at least this long before dying gets a fresh crash budget.
   healthyRunTime = time.Minute
   restartBackoff = 5 * time.Second
   // Reconciliation restarts any enabled stream that isn't running every 30s,
@@ -505,9 +466,9 @@ func (m *Manager) monitorProcess(streamID int, cmd *exec.Cmd, started time.Time)
     return
   }
 
-  // Count crashes per stream, not per restart attempt: every restarted ices
+  // Count crashes per stream, not per restart attempt: every restarted liquidsoap
   // gets its own monitorProcess, so a local counter would never reach the
-  // limit and an ices that dies on startup (e.g. the backend isn't accepting
+  // limit and a liquidsoap that dies on startup (e.g. the backend isn't accepting
   // connections yet after a reboot) would be respawned in a tight loop.
   if time.Since(started) >= healthyRunTime {
     m.crashes[streamID] = 0
@@ -520,8 +481,8 @@ func (m *Manager) monitorProcess(streamID int, cmd *exec.Cmd, started time.Time)
     zap.Int("stream_id", streamID),
     zap.Int("consecutive_crashes", crashes),
   )
-  if crashes > maxIcesCrashes {
-    m.logger.Error("Too many consecutive ices crashes, leaving the stream to reconciliation",
+  if crashes > maxCrashes {
+    m.logger.Error("Too many consecutive liquidsoap crashes, leaving the stream to reconciliation",
       zap.Int("stream_id", streamID),
     )
     return
@@ -538,7 +499,7 @@ func (m *Manager) restartStream(streamID int, attempt int, backoff time.Duration
   time.Sleep(backoff)
 
   // Wait for DynamoDB to be available with exponential backoff.
-  // This does not count against the ices crash limit.
+  // This does not count against the liquidsoap crash limit.
   const maxDynamoBackoff = 5 * time.Minute
   var streamProcess *state.StreamProcess
   var err error
@@ -574,7 +535,7 @@ func (m *Manager) restartStream(streamID int, attempt int, backoff time.Duration
     Description: streamProcess.Description,
     Premium:     streamProcess.Premium,
   }
-  // context.Background(), not a cancellable context: StartStream spawns ices
+  // context.Background(), not a cancellable context: StartStream spawns liquidsoap
   // with exec.CommandContext, so cancelling it would kill the new process.
   if err := m.StartStream(context.Background(), streamID, config); err != nil {
     m.logger.Error("Restart attempt failed, leaving the stream to reconciliation",

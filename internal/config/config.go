@@ -9,11 +9,11 @@ import (
 )
 
 type Config struct {
-	AWS     AWSConfig     `yaml:"aws"`
-	Ices    IcesConfig    `yaml:"ices"`
-	Icecast IcecastConfig `yaml:"icecast"`
-	API     APIConfig     `yaml:"api"`
-	Logging LoggingConfig `yaml:"logging"`
+	AWS        AWSConfig        `yaml:"aws"`
+	Liquidsoap LiquidsoapConfig `yaml:"liquidsoap"`
+	Icecast    IcecastConfig    `yaml:"icecast"`
+	API        APIConfig        `yaml:"api"`
+	Logging    LoggingConfig    `yaml:"logging"`
 }
 
 type AWSConfig struct {
@@ -22,10 +22,8 @@ type AWSConfig struct {
 	DynamoDBTable string `yaml:"dynamodb_table"`
 }
 
-type IcesConfig struct {
+type LiquidsoapConfig struct {
 	BinaryPath string `yaml:"binary_path"`
-	ConfigDir  string `yaml:"config_dir"`
-	LogDir     string `yaml:"log_dir"`
 }
 
 type IcecastConfig struct {
@@ -83,6 +81,12 @@ func Load() (*Config, error) {
 	}
 	if val := os.Getenv("ICECAST_PASSWORD"); val != "" {
 		config.Icecast.Password = val
+	}
+	if val := os.Getenv("LIQUIDSOAP_BINARY_PATH"); val != "" {
+		config.Liquidsoap.BinaryPath = val
+	}
+	if config.Liquidsoap.BinaryPath == "" {
+		config.Liquidsoap.BinaryPath = "/usr/bin/liquidsoap"
 	}
 
 	return &config, nil

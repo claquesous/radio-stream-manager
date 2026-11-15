@@ -21,7 +21,6 @@ type StreamProcess struct {
   StreamID      int       `dynamodbav:"stream_id"`
   Status        string    `dynamodbav:"status"`
   ProcessID     int       `dynamodbav:"process_id"`
-  ConfigPath    string    `dynamodbav:"config_path"`
   Mountpoint    string    `dynamodbav:"mountpoint"`
   CreatedAt     time.Time `dynamodbav:"created_at"`
   LastHeartbeat time.Time `dynamodbav:"last_heartbeat"`
