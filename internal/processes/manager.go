@@ -10,6 +10,7 @@ import (
   "os"
   "os/exec"
   "path/filepath"
+  "strings"
   "sync"
   "syscall"
   "time"
@@ -285,11 +286,8 @@ func (m *Manager) RestoreStreams(ctx context.Context) error {
       continue
     }
 
-    // Check if PID exists and is an ices process
     pid := process.ProcessID
-    procPath := fmt.Sprintf("/proc/%d/cmdline", pid)
-    cmdline, err := os.ReadFile(procPath)
-    if err == nil && len(cmdline) > 0 && (string(cmdline) == m.config.Ices.BinaryPath || string(cmdline[:len(m.config.Ices.BinaryPath)]) == m.config.Ices.BinaryPath) {
+    if runsBinary(pid, m.config.Ices.BinaryPath) {
       m.logger.Info("Reattaching to existing ices process",
         zap.Int("stream_id", process.StreamID),
         zap.Int("pid", pid),
@@ -328,6 +326,18 @@ func (m *Manager) RestoreStreams(ctx context.Context) error {
 
   m.logger.Info("Stream restoration complete")
   return nil
+}
+
+// runsBinary reports whether pid is a live process started as binaryPath.
+// After a reboot the PID in DynamoDB may belong to anything, with a command
+// line shorter than binaryPath.
+func runsBinary(pid int, binaryPath string) bool {
+  cmdline, err := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid))
+  if err != nil {
+    return false
+  }
+  argv0, _, _ := strings.Cut(string(cmdline), "\x00")
+  return argv0 == binaryPath
 }
 
 func (m *Manager) StartHealthMonitor(ctx context.Context) {
