@@ -1,6 +1,8 @@
 # One ClaqRadio stream, spawned by the stream manager with its config in env
-# vars. Like ices + ClaqRadio.pm, it asks Rails for every song
-# (POST /private/streams/:id/plays), which also records the Play.
+# vars. Like ices + ClaqRadio.pm, it asks the backend for every song
+# (POST /private/streams/:id/plays), which also records the Play. On startup it
+# first asks what is already on the air (GET .../plays/current) and joins that
+# song at its offset, so a restart doesn't skip to a new song.
 
 settings.log.stdout := true
 settings.log.file := false
@@ -16,37 +18,59 @@ premium = environment.get("PREMIUM") == "true"
 # StreamTitle, which the frontend player JSON.parses.
 now_playing = ref([])
 
+# Turns a play from the backend into a request for its song, remembering its
+# now-playing JSON for icy_song. Null if the response doesn't parse.
+def play_request(resp) =
+  try
+    let json.parse (play :
+      {
+        id: int,
+        offset: float?,
+        artist: {id: int, name: string},
+        song: {id: int, title: string, path: string, album: {title: string}?}
+      }
+    ) = resp
+    meta = json.stringify(compact=true, {
+      id = play.id,
+      artist = play.artist,
+      song = {id = play.song.id, title = play.song.title, album = play.song.album}
+    })
+    now_playing := list.prefix(5, (string(play.id), meta) :: now_playing())
+    # offset (optional): seconds into the song to start at.
+    offset = play.offset ?? 0.
+    cue_in = if offset > 0. then ",liq_cue_in=\"#{offset}\"" else "" end
+    request.create(
+      "annotate:claqradio_play=\"#{play.id}\"#{cue_in}:#{play.song.path}"
+    )
+  catch err do
+    log.important("Bad plays response: #{err}")
+    null
+  end
+end
+
+# Picks the next song, recording a Play.
 def next_song() =
   resp = http.post("#{api}/private/streams/#{stream_id}/plays")
   if resp.status_code != 201 then
     log.important("POST plays returned #{resp.status_code}: #{resp}")
     null
   else
-    try
-      let json.parse (play :
-        {
-          id: int,
-          offset: float?,
-          artist: {id: int, name: string},
-          song: {id: int, title: string, path: string, album: {title: string}?}
-        }
-      ) = resp
-      meta = json.stringify(compact=true, {
-        id = play.id,
-        artist = play.artist,
-        song = {id = play.song.id, title = play.song.title, album = play.song.album}
-      })
-      now_playing := list.prefix(5, (string(play.id), meta) :: now_playing())
-      # offset (optional): seconds into the song to start at.
-      offset = play.offset ?? 0.
-      cue_in = if offset > 0. then ",liq_cue_in=\"#{offset}\"" else "" end
-      request.create(
-        "annotate:claqradio_play=\"#{play.id}\"#{cue_in}:#{play.song.path}"
-      )
-    catch err do
-      log.important("Bad plays response: #{err}")
-      null
+    play_request(resp)
+  end
+end
+
+# The song on the air now, with how far in it is, so a restart picks it back
+# up instead of recording (and tooting) a new Play. Read-only; 404 when
+# nothing is playing or the song is about to end.
+def current_song() =
+  resp = http.get("#{api}/private/streams/#{stream_id}/plays/current")
+  if resp.status_code == 200 then
+    play_request(resp)
+  else
+    if resp.status_code != 404 then
+      log.important("GET plays/current returned #{resp.status_code}: #{resp}")
     end
+    null
   end
 end
 
@@ -71,6 +95,15 @@ queue = request.queue()
 # then costs about one Play a minute, not twelve.
 retry_delay = ref(5.)
 
+# Only the first fetch after startup resumes the current song; every later one
+# (including a retry, if that song couldn't be resolved) starts a new one.
+resuming = ref(true)
+
+def first_song() =
+  r = current_song()
+  if null.defined(r) then r else next_song() end
+end
+
 def rec fetch() =
   def retry() =
     thread.run(delay=retry_delay(), fetch)
@@ -86,7 +119,14 @@ def rec fetch() =
       retry()
     end
   end
-  null.case(next_song(), retry, enqueue)
+  song =
+    if resuming() then
+      resuming := false
+      first_song()
+    else
+      next_song()
+    end
+  null.case(song, retry, enqueue)
 end
 
 queue.on_position(
